@@ -60,9 +60,30 @@
           FLUSH PRIVILEGES;
           \""
 
-    - name: Apply schema (sql/schema.sql) via container exec stdin (no docker CLI)
+        # --- Resolve + verify + read schema.sql, then apply via stdin ---
+    - name: Resolve absolute schema path inside controller
+      ansible.builtin.set_fact:
+        schema_path: "{{ lookup('env','HOST_REPO') | default('/work', true) }}/sql/schema.sql"
+
+    - name: Check schema file exists in controller
+      ansible.builtin.stat:
+        path: "{{ schema_path }}"
+      register: schema_stat
+
+    - name: Fail early if schema is missing
+      ansible.builtin.fail:
+        msg: "Schema not found at {{ schema_path }} inside controller"
+      when: not schema_stat.stat.exists
+
+    - name: Read schema file (slurp)
+      ansible.builtin.slurp:
+        src: "{{ schema_path }}"
+      register: schema_b64
+
+    - name: Apply schema via container exec stdin (no docker CLI)
       community.docker.docker_container_exec:
-         container: "{{ mysql_name }}"
-         command: bash -lc "mysql -u{{ app_user }} -p{{ app_password }} {{ db_name }}"
-         stdin: "{{ lookup('file', 'sql/schema.sql') }}"
+        container: "{{ mysql_name }}"
+        command: bash -lc "mysql -u{{ app_user }} -p{{ app_password }} {{ db_name }}"
+        stdin: "{{ schema_b64.content | b64decode }}"
+
 
