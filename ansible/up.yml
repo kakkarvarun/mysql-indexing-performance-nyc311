@@ -102,30 +102,40 @@
         container: "{{ mysql_name }}"
         command: bash -lc "mkdir -p /import && chown -R 999:999 /import || true"
 
-    # Check all CSVs exist on the controller
-    - name: Check CSVs exist on controller
+        # We will load the normalized files (10 columns, exact order):
+    - name: Define normalized CSV list
+      ansible.builtin.set_fact:
+        norm_csvs:
+          - norm_nyc311_2025_sep.csv
+          - norm_nyc311_2025_oct01_nov24.csv
+
+    - name: Check normalized CSVs exist on controller
       ansible.builtin.stat:
         path: "{{ (lookup('env','HOST_REPO') | default('/work', true)) ~ '/data/' ~ item }}"
-      loop: "{{ csv_files }}"
-      register: csv_stats
+      loop: "{{ norm_csvs }}"
+      register: norm_stats
 
-    - name: Fail if any CSV missing
+    - name: Fail if any normalized CSV missing
       ansible.builtin.fail:
-        msg: "CSV missing: {{ item.item }}"
+        msg: "Missing normalized CSV: {{ item.stat.path }}"
       when: not item.stat.exists
-      loop: "{{ csv_stats.results }}"
+      loop: "{{ norm_stats.results }}"
 
-    # Copy each CSV into the container /import
-    - name: Copy CSVs into MySQL container
+    - name: Ensure /import exists and is writable inside mysql container
+      community.docker.docker_container_exec:
+        container: "{{ mysql_name }}"
+        command: bash -lc "mkdir -p /import && chmod 777 /import"
+
+    - name: Copy normalized CSVs into MySQL container
       community.docker.docker_container_copy_into:
         container: "{{ mysql_name }}"
         path: "{{ (lookup('env','HOST_REPO') | default('/work', true)) ~ '/data/' ~ item }}"
         container_path: "/import/{{ item }}"
         mode: '0644'
-      loop: "{{ csv_files }}"
+      loop: "{{ norm_csvs }}"
 
-    # Load each CSV into the STAGING table (strings only)
-    - name: LOAD each CSV into nyc311_stage (stdin loop)
+    # Load each normalized CSV into STAGING by column order
+    - name: LOAD each normalized CSV into nyc311_stage
       community.docker.docker_container_exec:
         container: "{{ mysql_name }}"
         command: bash -lc "mysql --local-infile=1 -u{{ app_user }} -p{{ app_password }} {{ db_name }}"
@@ -133,20 +143,20 @@
           LOAD DATA LOCAL INFILE '/import/{{ item }}'
           INTO TABLE nyc311_stage
           FIELDS TERMINATED BY ',' ENCLOSED BY '"'
-          LINES TERMINATED BY '{{ lines_terminated }}'
+          LINES TERMINATED BY '\r\n'
           IGNORE 1 LINES
-          (created_date_txt, closed_date_txt, complaint_type, descriptor, borough, incident_zip, status, resolution_description, latitude_txt, longitude_txt);
-      loop: "{{ csv_files }}"
+          (created_date_txt, closed_date_txt, complaint_type, descriptor, borough,
+           incident_zip, status, resolution_description, latitude_txt, longitude_txt);
+      loop: "{{ norm_csvs }}"
 
-        # Clean final table before re-inserting (rerun-safe)
-    - name: Truncate final table nyc311 (rerun-safe)
+
+            - name: Truncate final table nyc311 (rerun-safe)
       community.docker.docker_container_exec:
         container: "{{ mysql_name }}"
         command: bash -lc "mysql -u{{ app_user }} -p{{ app_password }} {{ db_name }}"
         stdin: "TRUNCATE TABLE nyc311;"
 
-    # Robust transform: only parse strings that look like datetimes; ignore numerics like '66925104'
-    - name: Transform from staging -> final typed table (robust date + numeric guards)
+    - name: Transform from staging -> final typed table (robust)
       community.docker.docker_container_exec:
         container: "{{ mysql_name }}"
         command: bash -lc "mysql -u{{ app_user }} -p{{ app_password }} {{ db_name }}"
@@ -164,9 +174,11 @@
                   STR_TO_DATE(created_date_txt, '%Y-%m-%dT%H:%i:%s')
                 )
               WHEN created_date_txt REGEXP '^[0-9]{1,2}/[0-9]{1,2}/[0-9]{4}' THEN
-                /* e.g. 10/25/2025 02:31:00 AM */
-                STR_TO_DATE(created_date_txt, '%m/%d/%Y %r')
-              WHEN created_date_txt REGEXP '^[0-9]+$' THEN NULL
+                /* e.g. 10/25/2025 02:31:00 AM or without time -> treat as midnight */
+                COALESCE(
+                  STR_TO_DATE(created_date_txt, '%m/%d/%Y %r'),
+                  STR_TO_DATE(CONCAT(created_date_txt,' 12:00:00 AM'), '%m/%d/%Y %r')
+                )
               ELSE NULL
             END AS created_date,
 
@@ -178,29 +190,43 @@
                   STR_TO_DATE(closed_date_txt, '%Y-%m-%dT%H:%i:%s')
                 )
               WHEN closed_date_txt REGEXP '^[0-9]{1,2}/[0-9]{1,2}/[0-9]{4}' THEN
-                STR_TO_DATE(closed_date_txt, '%m/%d/%Y %r')
-              WHEN closed_date_txt REGEXP '^[0-9]+$' THEN NULL
+                COALESCE(
+                  STR_TO_DATE(closed_date_txt, '%m/%d/%Y %r'),
+                  STR_TO_DATE(CONCAT(closed_date_txt,' 12:00:00 AM'), '%m/%d/%Y %r')
+                )
               ELSE NULL
             END AS closed_date,
 
             complaint_type,
             descriptor,
             borough,
-            incident_zip,
+
+            /* incident_zip: keep 5-digit or 5+4, else NULL */
+            CASE
+              WHEN incident_zip REGEXP '^[0-9]{5}$' THEN incident_zip
+              WHEN incident_zip REGEXP '^[0-9]{5}-[0-9]{4}$' THEN SUBSTRING_INDEX(incident_zip,'-',1)
+              ELSE NULL
+            END AS incident_zip,
+
             status,
             resolution_description,
 
-            /* latitude */
+            /* latitude bounded to [-90,90] and numeric */
             CASE
-              WHEN latitude_txt REGEXP '^-?[0-9]+(\\.[0-9]+)?$' THEN CAST(latitude_txt AS DECIMAL(9,6))
+              WHEN latitude_txt REGEXP '^-?[0-9]+(\\.[0-9]+)?$'
+                   AND CAST(latitude_txt AS DECIMAL(10,6)) BETWEEN -90 AND 90
+                THEN CAST(latitude_txt AS DECIMAL(10,6))
               ELSE NULL
             END AS latitude,
 
-            /* longitude */
+            /* longitude bounded to [-180,180] and numeric */
             CASE
-              WHEN longitude_txt REGEXP '^-?[0-9]+(\\.[0-9]+)?$' THEN CAST(longitude_txt AS DECIMAL(9,6))
+              WHEN longitude_txt REGEXP '^-?[0-9]+(\\.[0-9]+)?$'
+                   AND CAST(longitude_txt AS DECIMAL(10,6)) BETWEEN -180 AND 180
+                THEN CAST(longitude_txt AS DECIMAL(10,6))
               ELSE NULL
             END AS longitude
           FROM nyc311_stage;
+
 
 
