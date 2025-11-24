@@ -12,18 +12,25 @@
     app_user: app_user
     app_password: app_password
 
-  tasks:
+    tasks:
     - name: Ensure Docker network exists
       community.docker.docker_network:
         name: "{{ net_name }}"
         state: present
+
+    # NEW: remove any old container so previous read-only mounts are gone
+    - name: Remove any existing MySQL container (drop old mounts)
+      community.docker.docker_container:
+        name: "{{ mysql_name }}"
+        state: absent
+        force_kill: true
 
     - name: Start MySQL container (local_infile=1, utf8mb4)
       community.docker.docker_container:
         name: "{{ mysql_name }}"
         image: "{{ mysql_image }}"
         state: started
-        recreate: false
+        recreate: true
         restart_policy: unless-stopped
         networks:
           - name: "{{ net_name }}"
@@ -56,43 +63,8 @@
           GRANT ALL PRIVILEGES ON {{ db_name }}.* TO '{{ app_user }}'@'%';
           FLUSH PRIVILEGES;
           \""
-          # Ensure a writable /import inside MySQL (we will copy the CSV here)
-    - name: Ensure /import directory exists in mysql container
-      community.docker.docker_container_exec:
-        container: "{{ mysql_name }}"
-        command: bash -lc "mkdir -p /import && chown -R 999:999 /import || true"
 
-    - name: Resolve absolute CSV path inside controller
-      ansible.builtin.set_fact:
-        csv_src: "{{ (lookup('env','HOST_REPO') | default('/work', true)) ~ '/data/nyc311_q1_2024.csv' }}"
-
-    - name: Copy CSV from controller into MySQL container
-      community.docker.docker_container_copy_into:
-        container: "{{ mysql_name }}"
-        path: "{{ csv_src }}"
-        container_path: "/import/nyc311_q1_2024.csv"
-        mode: '0644'
-
-    - name: Load CSV with LOAD DATA LOCAL INFILE (client-side, avoids secure_file_priv)
-      community.docker.docker_container_exec:
-        container: "{{ mysql_name }}"
-        command: >
-          bash -lc "mysql --local-infile=1 -u{{ app_user }} -p{{ app_password }} {{ db_name }} -e
-          \"
-          LOAD DATA LOCAL INFILE '/import/nyc311_q1_2024.csv'
-          INTO TABLE nyc311
-          FIELDS TERMINATED BY ',' ENCLOSED BY '\"'
-          LINES TERMINATED BY '\n'
-          IGNORE 1 LINES
-          (@created_date,@closed_date,complaint_type,descriptor,borough,incident_zip,status,resolution_description,latitude,longitude)
-          SET
-            created_date = NULLIF(STR_TO_DATE(@created_date, '%Y-%m-%dT%H:%i:%s.%f'), ''),
-            closed_date  = NULLIF(STR_TO_DATE(@closed_date,  '%Y-%m-%dT%H:%i:%s.%f'), '');
-          \""
-
-
-
-        # --- Resolve + verify + read schema.sql, then apply via stdin ---
+    # ---- SCHEMA FIRST ----
     - name: Resolve absolute schema path inside controller
       ansible.builtin.set_fact:
         schema_path: "{{ lookup('env','HOST_REPO') | default('/work', true) }}/sql/schema.sql"
@@ -112,10 +84,45 @@
         src: "{{ schema_path }}"
       register: schema_b64
 
-    - name: Apply schema via container exec stdin (no docker CLI)
+    - name: Apply schema via container exec stdin
       community.docker.docker_container_exec:
         container: "{{ mysql_name }}"
         command: bash -lc "mysql -u{{ app_user }} -p{{ app_password }} {{ db_name }}"
         stdin: "{{ schema_b64.content | b64decode }}"
+
+    # ---- NOW CSV COPY + LOAD ----
+    - name: Ensure /import directory exists in mysql container
+      community.docker.docker_container_exec:
+        container: "{{ mysql_name }}"
+        command: bash -lc "mkdir -p /import && chown -R 999:999 /import || true"
+
+    - name: Resolve absolute CSV path inside controller
+      ansible.builtin.set_fact:
+        csv_src: "{{ (lookup('env','HOST_REPO') | default('/work', true)) ~ '/data/nyc311_q1_2024.csv' }}"
+
+    - name: Copy CSV from controller into MySQL container
+      community.docker.docker_container_copy_into:
+        container: "{{ mysql_name }}"
+        path: "{{ csv_src }}"
+        container_path: "/import/nyc311_q1_2024.csv"
+        mode: '0644'
+
+    - name: Load CSV with LOAD DATA LOCAL INFILE (client-side)
+      community.docker.docker_container_exec:
+        container: "{{ mysql_name }}"
+        command: >
+          bash -lc "mysql --local-infile=1 -u{{ app_user }} -p{{ app_password }} {{ db_name }} -e
+          \"
+          LOAD DATA LOCAL INFILE '/import/nyc311_q1_2024.csv'
+          INTO TABLE nyc311
+          FIELDS TERMINATED BY ',' ENCLOSED BY '\"'
+          LINES TERMINATED BY '\n'
+          IGNORE 1 LINES
+          (@created_date,@closed_date,complaint_type,descriptor,borough,incident_zip,status,resolution_description,latitude,longitude)
+          SET
+            created_date = NULLIF(STR_TO_DATE(@created_date, '%Y-%m-%dT%H:%i:%s.%f'), ''),
+            closed_date  = NULLIF(STR_TO_DATE(@closed_date,  '%Y-%m-%dT%H:%i:%s.%f'), '');
+          \""
+
 
 
