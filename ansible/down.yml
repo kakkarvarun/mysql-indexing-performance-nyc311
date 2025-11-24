@@ -1,0 +1,19 @@
+---
+- name: A5 - Tear down MySQL + network
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    net_name: nyc311_net
+    mysql_name: mysql_nyc311
+
+  tasks:
+    - name: Remove MySQL container if present
+      community.docker.docker_container:
+        name: "{{ mysql_name }}"
+        state: absent
+
+    - name: Remove Docker network if present
+      community.docker.docker_network:
+        name: "{{ net_name }}"
+        state: absent
