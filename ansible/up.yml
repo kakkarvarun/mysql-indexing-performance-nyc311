@@ -34,9 +34,6 @@
           - --local-infile=1
           - --character-set-server=utf8mb4
           - --collation-server=utf8mb4_unicode_ci
-        volumes:
-          # Make data CSVs available at /import
-          - "{{ lookup('env', 'HOST_REPO') | default('/work', true) }}/data:/import:ro"
         published_ports:
           - "3306:3306"
 
@@ -59,7 +56,7 @@
           GRANT ALL PRIVILEGES ON {{ db_name }}.* TO '{{ app_user }}'@'%';
           FLUSH PRIVILEGES;
           \""
-      # Ensure a writable /import inside MySQL (we will copy CSV here)
+          # Ensure a writable /import inside MySQL (we will copy the CSV here)
     - name: Ensure /import directory exists in mysql container
       community.docker.docker_container_exec:
         container: "{{ mysql_name }}"
@@ -73,16 +70,16 @@
       community.docker.docker_container_copy_into:
         container: "{{ mysql_name }}"
         path: "{{ csv_src }}"
-        dest: "/import/nyc311_q1_2024.csv"
+        container_path: "/import/nyc311_q1_2024.csv"
         mode: '0644'
 
-    - name: Load CSV with LOAD DATA INFILE (server-side path)
+    - name: Load CSV with LOAD DATA LOCAL INFILE (client-side, avoids secure_file_priv)
       community.docker.docker_container_exec:
         container: "{{ mysql_name }}"
         command: >
-          bash -lc "mysql -u{{ app_user }} -p{{ app_password }} {{ db_name }} -e
+          bash -lc "mysql --local-infile=1 -u{{ app_user }} -p{{ app_password }} {{ db_name }} -e
           \"
-          LOAD DATA INFILE '/import/nyc311_q1_2024.csv'
+          LOAD DATA LOCAL INFILE '/import/nyc311_q1_2024.csv'
           INTO TABLE nyc311
           FIELDS TERMINATED BY ',' ENCLOSED BY '\"'
           LINES TERMINATED BY '\n'
@@ -92,6 +89,7 @@
             created_date = NULLIF(STR_TO_DATE(@created_date, '%Y-%m-%dT%H:%i:%s.%f'), ''),
             closed_date  = NULLIF(STR_TO_DATE(@closed_date,  '%Y-%m-%dT%H:%i:%s.%f'), '');
           \""
+
 
 
         # --- Resolve + verify + read schema.sql, then apply via stdin ---
