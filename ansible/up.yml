@@ -138,29 +138,69 @@
           (created_date_txt, closed_date_txt, complaint_type, descriptor, borough, incident_zip, status, resolution_description, latitude_txt, longitude_txt);
       loop: "{{ csv_files }}"
 
-    # Transform once from staging -> final typed table
-    - name: Transform from staging -> final typed table
+        # Clean final table before re-inserting (rerun-safe)
+    - name: Truncate final table nyc311 (rerun-safe)
       community.docker.docker_container_exec:
         container: "{{ mysql_name }}"
-        command: >
-          bash -lc "mysql -u{{ app_user }} -p{{ app_password }} {{ db_name }} -e
-          \"
-          INSERT INTO nyc311(
+        command: bash -lc "mysql -u{{ app_user }} -p{{ app_password }} {{ db_name }}"
+        stdin: "TRUNCATE TABLE nyc311;"
+
+    # Robust transform: only parse strings that look like datetimes; ignore numerics like '66925104'
+    - name: Transform from staging -> final typed table (robust date + numeric guards)
+      community.docker.docker_container_exec:
+        container: "{{ mysql_name }}"
+        command: bash -lc "mysql -u{{ app_user }} -p{{ app_password }} {{ db_name }}"
+        stdin: |
+          INSERT INTO nyc311 (
             created_date, closed_date, complaint_type, descriptor, borough,
             incident_zip, status, resolution_description, latitude, longitude
           )
           SELECT
+            /* created_date */
             CASE
-              WHEN created_date_txt LIKE '%.%' THEN STR_TO_DATE(NULLIF(created_date_txt,''), '%Y-%m-%dT%H:%i:%s.%f')
-              ELSE STR_TO_DATE(NULLIF(created_date_txt,''), '%Y-%m-%dT%H:%i:%s')
-            END,
+              WHEN created_date_txt REGEXP '^[0-9]{4}-[0-9]{2}-[0-9]{2}T' THEN
+                COALESCE(
+                  STR_TO_DATE(created_date_txt, '%Y-%m-%dT%H:%i:%s.%f'),
+                  STR_TO_DATE(created_date_txt, '%Y-%m-%dT%H:%i:%s')
+                )
+              WHEN created_date_txt REGEXP '^[0-9]{1,2}/[0-9]{1,2}/[0-9]{4}' THEN
+                /* e.g. 10/25/2025 02:31:00 AM */
+                STR_TO_DATE(created_date_txt, '%m/%d/%Y %r')
+              WHEN created_date_txt REGEXP '^[0-9]+$' THEN NULL
+              ELSE NULL
+            END AS created_date,
+
+            /* closed_date */
             CASE
-              WHEN closed_date_txt  LIKE '%.%' THEN STR_TO_DATE(NULLIF(closed_date_txt,''),  '%Y-%m-%dT%H:%i:%s.%f')
-              ELSE STR_TO_DATE(NULLIF(closed_date_txt,''),  '%Y-%m-%dT%H:%i:%s')
-            END,
-            complaint_type, descriptor, borough, incident_zip, status, resolution_description,
-            NULLIF(NULLIF(latitude_txt,  ''), 'NULL')+0,
-            NULLIF(NULLIF(longitude_txt, ''), 'NULL')+0
+              WHEN closed_date_txt REGEXP '^[0-9]{4}-[0-9]{2}-[0-9]{2}T' THEN
+                COALESCE(
+                  STR_TO_DATE(closed_date_txt, '%Y-%m-%dT%H:%i:%s.%f'),
+                  STR_TO_DATE(closed_date_txt, '%Y-%m-%dT%H:%i:%s')
+                )
+              WHEN closed_date_txt REGEXP '^[0-9]{1,2}/[0-9]{1,2}/[0-9]{4}' THEN
+                STR_TO_DATE(closed_date_txt, '%m/%d/%Y %r')
+              WHEN closed_date_txt REGEXP '^[0-9]+$' THEN NULL
+              ELSE NULL
+            END AS closed_date,
+
+            complaint_type,
+            descriptor,
+            borough,
+            incident_zip,
+            status,
+            resolution_description,
+
+            /* latitude */
+            CASE
+              WHEN latitude_txt REGEXP '^-?[0-9]+(\\.[0-9]+)?$' THEN CAST(latitude_txt AS DECIMAL(9,6))
+              ELSE NULL
+            END AS latitude,
+
+            /* longitude */
+            CASE
+              WHEN longitude_txt REGEXP '^-?[0-9]+(\\.[0-9]+)?$' THEN CAST(longitude_txt AS DECIMAL(9,6))
+              ELSE NULL
+            END AS longitude
           FROM nyc311_stage;
-          \""
+
 
