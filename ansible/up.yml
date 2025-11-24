@@ -35,7 +35,10 @@
           - --character-set-server=utf8mb4
           - --collation-server=utf8mb4_unicode_ci
         volumes:
+          # Make data CSVs available at /import
           - "{{ lookup('env', 'HOST_REPO') | default('/work', true) }}/data:/import:ro"
+          # Make the entire repo available at /work so schema.sql is visible inside the container
+          - "{{ lookup('env', 'HOST_REPO') | default('/work', true) }}:/work:ro"
         published_ports:
           - "3306:3306"
 
