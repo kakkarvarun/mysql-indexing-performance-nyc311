@@ -37,8 +37,6 @@
         volumes:
           # Make data CSVs available at /import
           - "{{ lookup('env', 'HOST_REPO') | default('/work', true) }}/data:/import:ro"
-          # Make the entire repo available at /work so schema.sql is visible inside the container
-          - "{{ lookup('env', 'HOST_REPO') | default('/work', true) }}:/work:ro"
         published_ports:
           - "3306:3306"
 
@@ -62,8 +60,7 @@
           FLUSH PRIVILEGES;
           \""
 
-    - name: Apply schema (sql/schema.sql)
-      community.docker.docker_container_exec:
-        container: "{{ mysql_name }}"
-        command: >
-          bash -lc "mysql -u{{ app_user }} -p{{ app_password }} {{ db_name }} < /work/sql/schema.sql"
+    - name: Apply schema (sql/schema.sql) via docker exec stdin
+      ansible.builtin.shell: |
+        docker exec -i {{ mysql_name }} sh -lc "mysql -u{{ app_user }} -p{{ app_password }} {{ db_name }}" < "{{ lookup('env', 'HOST_REPO') | default('/work', true) }}/sql/schema.sql"
+
