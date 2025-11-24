@@ -59,6 +59,40 @@
           GRANT ALL PRIVILEGES ON {{ db_name }}.* TO '{{ app_user }}'@'%';
           FLUSH PRIVILEGES;
           \""
+      # Ensure a writable /import inside MySQL (we will copy CSV here)
+    - name: Ensure /import directory exists in mysql container
+      community.docker.docker_container_exec:
+        container: "{{ mysql_name }}"
+        command: bash -lc "mkdir -p /import && chown -R 999:999 /import || true"
+
+    - name: Resolve absolute CSV path inside controller
+      ansible.builtin.set_fact:
+        csv_src: "{{ (lookup('env','HOST_REPO') | default('/work', true)) ~ '/data/nyc311_q1_2024.csv' }}"
+
+    - name: Copy CSV from controller into MySQL container
+      community.docker.docker_container_copy_into:
+        container: "{{ mysql_name }}"
+        path: "{{ csv_src }}"
+        dest: "/import/nyc311_q1_2024.csv"
+        mode: '0644'
+
+    - name: Load CSV with LOAD DATA INFILE (server-side path)
+      community.docker.docker_container_exec:
+        container: "{{ mysql_name }}"
+        command: >
+          bash -lc "mysql -u{{ app_user }} -p{{ app_password }} {{ db_name }} -e
+          \"
+          LOAD DATA INFILE '/import/nyc311_q1_2024.csv'
+          INTO TABLE nyc311
+          FIELDS TERMINATED BY ',' ENCLOSED BY '\"'
+          LINES TERMINATED BY '\n'
+          IGNORE 1 LINES
+          (@created_date,@closed_date,complaint_type,descriptor,borough,incident_zip,status,resolution_description,latitude,longitude)
+          SET
+            created_date = NULLIF(STR_TO_DATE(@created_date, '%Y-%m-%dT%H:%i:%s.%f'), ''),
+            closed_date  = NULLIF(STR_TO_DATE(@closed_date,  '%Y-%m-%dT%H:%i:%s.%f'), '');
+          \""
+
 
         # --- Resolve + verify + read schema.sql, then apply via stdin ---
     - name: Resolve absolute schema path inside controller
