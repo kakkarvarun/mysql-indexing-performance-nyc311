@@ -1,0 +1,13 @@
+# Large data files - never commit
+data/*.csv
+data/*.parquet
+data/*.zip
+
+# Local outputs
+results/
+*.log
+
+# OS/editor noise
+.DS_Store
+Thumbs.db
+.vscode/
