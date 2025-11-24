@@ -12,7 +12,9 @@
     db_name: nyc311_db
     app_user: app_user
     app_password: app_password
-    csv_filename: nyc311_q1_2024.csv
+    csv_files:
+      - nyc311_2025_oct01_nov24.csv
+      - nyc311_2025_sep.csv
     # On Windows CSVs often have CRLF line endings
     lines_terminated: "\r\n"
 
@@ -100,43 +102,65 @@
         container: "{{ mysql_name }}"
         command: bash -lc "mkdir -p /import && chown -R 999:999 /import || true"
 
-    - name: Resolve absolute CSV path inside controller
-      ansible.builtin.set_fact:
-        csv_src: "{{ (lookup('env','HOST_REPO') | default('/work', true)) ~ '/data/' ~ csv_filename }}"
-
-    - name: Check CSV exists on controller
+    # Check all CSVs exist on the controller
+    - name: Check CSVs exist on controller
       ansible.builtin.stat:
-        path: "{{ csv_src }}"
-      register: csv_stat
+        path: "{{ (lookup('env','HOST_REPO') | default('/work', true)) ~ '/data/' ~ item }}"
+      loop: "{{ csv_files }}"
+      register: csv_stats
 
-    - name: Fail if CSV missing
+    - name: Fail if any CSV missing
       ansible.builtin.fail:
-        msg: "CSV not found at {{ csv_src }} (put your file there, e.g. data/{{ csv_filename }})"
-      when: not csv_stat.stat.exists
+        msg: "CSV missing: {{ item.item }}"
+      when: not item.stat.exists
+      loop: "{{ csv_stats.results }}"
 
-    - name: Copy CSV from controller into MySQL container
+    # Copy each CSV into the container /import
+    - name: Copy CSVs into MySQL container
       community.docker.docker_container_copy_into:
         container: "{{ mysql_name }}"
-        path: "{{ csv_src }}"
-        container_path: "/import/{{ csv_filename }}"
+        path: "{{ (lookup('env','HOST_REPO') | default('/work', true)) ~ '/data/' ~ item }}"
+        container_path: "/import/{{ item }}"
         mode: '0644'
+      loop: "{{ csv_files }}"
 
-    - name: Build LOAD DATA SQL (no shell quoting; we’ll send via stdin)
-      ansible.builtin.set_fact:
-        load_sql: |
-          LOAD DATA LOCAL INFILE '/import/{{ csv_filename }}'
-          INTO TABLE nyc311
-          FIELDS TERMINATED BY ',' ENCLOSED BY '"'
-          LINES TERMINATED BY '{{ lines_terminated }}'
-          IGNORE 1 LINES
-          (@created_date,@closed_date,complaint_type,descriptor,borough,incident_zip,status,resolution_description,latitude,longitude)
-          SET
-            created_date = NULLIF(STR_TO_DATE(@created_date, '%Y-%m-%dT%H:%i:%s.%f'), ''),
-            closed_date  = NULLIF(STR_TO_DATE(@closed_date,  '%Y-%m-%dT%H:%i:%s.%f'), '');
-
-    - name: Load CSV using mysql client (stdin)
+    # Load each CSV into the STAGING table (strings only)
+    - name: LOAD each CSV into nyc311_stage (stdin loop)
       community.docker.docker_container_exec:
         container: "{{ mysql_name }}"
         command: bash -lc "mysql --local-infile=1 -u{{ app_user }} -p{{ app_password }} {{ db_name }}"
-        stdin: "{{ load_sql }}"
+        stdin: |
+          LOAD DATA LOCAL INFILE '/import/{{ item }}'
+          INTO TABLE nyc311_stage
+          FIELDS TERMINATED BY ',' ENCLOSED BY '"'
+          LINES TERMINATED BY '{{ lines_terminated }}'
+          IGNORE 1 LINES
+          (created_date_txt, closed_date_txt, complaint_type, descriptor, borough, incident_zip, status, resolution_description, latitude_txt, longitude_txt);
+      loop: "{{ csv_files }}"
+
+    # Transform once from staging -> final typed table
+    - name: Transform from staging -> final typed table
+      community.docker.docker_container_exec:
+        container: "{{ mysql_name }}"
+        command: >
+          bash -lc "mysql -u{{ app_user }} -p{{ app_password }} {{ db_name }} -e
+          \"
+          INSERT INTO nyc311(
+            created_date, closed_date, complaint_type, descriptor, borough,
+            incident_zip, status, resolution_description, latitude, longitude
+          )
+          SELECT
+            CASE
+              WHEN created_date_txt LIKE '%.%' THEN STR_TO_DATE(NULLIF(created_date_txt,''), '%Y-%m-%dT%H:%i:%s.%f')
+              ELSE STR_TO_DATE(NULLIF(created_date_txt,''), '%Y-%m-%dT%H:%i:%s')
+            END,
+            CASE
+              WHEN closed_date_txt  LIKE '%.%' THEN STR_TO_DATE(NULLIF(closed_date_txt,''),  '%Y-%m-%dT%H:%i:%s.%f')
+              ELSE STR_TO_DATE(NULLIF(closed_date_txt,''),  '%Y-%m-%dT%H:%i:%s')
+            END,
+            complaint_type, descriptor, borough, incident_zip, status, resolution_description,
+            NULLIF(NULLIF(latitude_txt,  ''), 'NULL')+0,
+            NULLIF(NULLIF(longitude_txt, ''), 'NULL')+0
+          FROM nyc311_stage;
+          \""
 
