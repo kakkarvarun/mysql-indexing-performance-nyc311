@@ -1,0 +1,3 @@
+query,mode,ms
+Q1_counts_per_borough_30d,b-tree/none,1296.30
+FT1_noise,like,687.52
