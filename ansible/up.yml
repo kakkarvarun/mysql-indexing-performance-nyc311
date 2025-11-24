@@ -1,0 +1,66 @@
+---
+- name: A5 - Bring up MySQL for NYC311 and create schema
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    net_name: nyc311_net
+    mysql_name: mysql_nyc311
+    mysql_image: mysql:8.0
+    root_password: rootpw
+    db_name: nyc311_db
+    app_user: app_user
+    app_password: app_password
+
+  tasks:
+    - name: Ensure Docker network exists
+      community.docker.docker_network:
+        name: "{{ net_name }}"
+        state: present
+
+    - name: Start MySQL container (local_infile=1, utf8mb4)
+      community.docker.docker_container:
+        name: "{{ mysql_name }}"
+        image: "{{ mysql_image }}"
+        state: started
+        recreate: false
+        restart_policy: unless-stopped
+        networks:
+          - name: "{{ net_name }}"
+        env:
+          MYSQL_ROOT_PASSWORD: "{{ root_password }}"
+          MYSQL_DATABASE: "{{ db_name }}"
+        command:
+          - --local-infile=1
+          - --character-set-server=utf8mb4
+          - --collation-server=utf8mb4_unicode_ci
+        volumes:
+          - "{{ HOST_REPO }}/data:/import:ro"
+        published_ports:
+          - "3306:3306"
+
+    - name: Wait for MySQL to accept root connections
+      community.docker.docker_container_exec:
+        container: "{{ mysql_name }}"
+        command: bash -lc "mysqladmin ping -h 127.0.0.1 -p{{ root_password }} --silent"
+      register: ping
+      retries: 60
+      delay: 2
+      until: ping.rc == 0
+
+    - name: Create app user and grant privileges
+      community.docker.docker_container_exec:
+        container: "{{ mysql_name }}"
+        command: >
+          bash -lc "mysql -uroot -p{{ root_password }} -e
+          \"
+          CREATE USER IF NOT EXISTS '{{ app_user }}'@'%' IDENTIFIED BY '{{ app_password }}';
+          GRANT ALL PRIVILEGES ON {{ db_name }}.* TO '{{ app_user }}'@'%';
+          FLUSH PRIVILEGES;
+          \""
+
+    - name: Apply schema (sql/schema.sql)
+      community.docker.docker_container_exec:
+        container: "{{ mysql_name }}"
+        command: >
+          bash -lc "mysql -u{{ app_user }} -p{{ app_password }} {{ db_name }} < /work/sql/schema.sql"
