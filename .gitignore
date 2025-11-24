@@ -4,8 +4,8 @@ data/*.parquet
 data/*.zip
 
 # Local outputs
-results/
-*.log
+#results/
+#*.log
 
 # OS/editor noise
 .DS_Store
