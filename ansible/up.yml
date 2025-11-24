@@ -3,6 +3,7 @@
   hosts: localhost
   connection: local
   gather_facts: false
+
   vars:
     net_name: nyc311_net
     mysql_name: mysql_nyc311
@@ -11,14 +12,17 @@
     db_name: nyc311_db
     app_user: app_user
     app_password: app_password
+    csv_filename: nyc311_q1_2024.csv
+    # On Windows CSVs often have CRLF line endings
+    lines_terminated: "\r\n"
 
-    tasks:
+  tasks:
     - name: Ensure Docker network exists
       community.docker.docker_network:
         name: "{{ net_name }}"
         state: present
 
-    # NEW: remove any old container so previous read-only mounts are gone
+    # Start from a clean MySQL container (remove any old read-only mounts)
     - name: Remove any existing MySQL container (drop old mounts)
       community.docker.docker_container:
         name: "{{ mysql_name }}"
@@ -64,7 +68,7 @@
           FLUSH PRIVILEGES;
           \""
 
-    # ---- SCHEMA FIRST ----
+    # ---------- SCHEMA FIRST ----------
     - name: Resolve absolute schema path inside controller
       ansible.builtin.set_fact:
         schema_path: "{{ lookup('env','HOST_REPO') | default('/work', true) }}/sql/schema.sql"
@@ -90,7 +94,7 @@
         command: bash -lc "mysql -u{{ app_user }} -p{{ app_password }} {{ db_name }}"
         stdin: "{{ schema_b64.content | b64decode }}"
 
-    # ---- NOW CSV COPY + LOAD ----
+    # ---------- NOW COPY + LOAD CSV ----------
     - name: Ensure /import directory exists in mysql container
       community.docker.docker_container_exec:
         container: "{{ mysql_name }}"
@@ -98,13 +102,23 @@
 
     - name: Resolve absolute CSV path inside controller
       ansible.builtin.set_fact:
-        csv_src: "{{ (lookup('env','HOST_REPO') | default('/work', true)) ~ '/data/nyc311_q1_2024.csv' }}"
+        csv_src: "{{ (lookup('env','HOST_REPO') | default('/work', true)) ~ '/data/' ~ csv_filename }}"
+
+    - name: Check CSV exists on controller
+      ansible.builtin.stat:
+        path: "{{ csv_src }}"
+      register: csv_stat
+
+    - name: Fail if CSV missing
+      ansible.builtin.fail:
+        msg: "CSV not found at {{ csv_src }} (put your file there, e.g. data/{{ csv_filename }})"
+      when: not csv_stat.stat.exists
 
     - name: Copy CSV from controller into MySQL container
       community.docker.docker_container_copy_into:
         container: "{{ mysql_name }}"
         path: "{{ csv_src }}"
-        container_path: "/import/nyc311_q1_2024.csv"
+        container_path: "/import/{{ csv_filename }}"
         mode: '0644'
 
     - name: Load CSV with LOAD DATA LOCAL INFILE (client-side)
@@ -113,16 +127,13 @@
         command: >
           bash -lc "mysql --local-infile=1 -u{{ app_user }} -p{{ app_password }} {{ db_name }} -e
           \"
-          LOAD DATA LOCAL INFILE '/import/nyc311_q1_2024.csv'
+          LOAD DATA LOCAL INFILE '/import/{{ csv_filename }}'
           INTO TABLE nyc311
           FIELDS TERMINATED BY ',' ENCLOSED BY '\"'
-          LINES TERMINATED BY '\n'
+          LINES TERMINATED BY '{{ lines_terminated }}'
           IGNORE 1 LINES
           (@created_date,@closed_date,complaint_type,descriptor,borough,incident_zip,status,resolution_description,latitude,longitude)
           SET
             created_date = NULLIF(STR_TO_DATE(@created_date, '%Y-%m-%dT%H:%i:%s.%f'), ''),
             closed_date  = NULLIF(STR_TO_DATE(@closed_date,  '%Y-%m-%dT%H:%i:%s.%f'), '');
           \""
-
-
-
