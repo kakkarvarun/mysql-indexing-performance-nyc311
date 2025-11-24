@@ -60,7 +60,9 @@
           FLUSH PRIVILEGES;
           \""
 
-    - name: Apply schema (sql/schema.sql) via docker exec stdin
-      ansible.builtin.shell: |
-        docker exec -i {{ mysql_name }} sh -lc "mysql -u{{ app_user }} -p{{ app_password }} {{ db_name }}" < "{{ lookup('env', 'HOST_REPO') | default('/work', true) }}/sql/schema.sql"
+    - name: Apply schema (sql/schema.sql) via container exec stdin (no docker CLI)
+      community.docker.docker_container_exec:
+         container: "{{ mysql_name }}"
+         command: bash -lc "mysql -u{{ app_user }} -p{{ app_password }} {{ db_name }}"
+         stdin: "{{ lookup('file', 'sql/schema.sql') }}"
 
