@@ -35,7 +35,7 @@
           - --character-set-server=utf8mb4
           - --collation-server=utf8mb4_unicode_ci
         volumes:
-          - "{{ HOST_REPO }}/data:/import:ro"
+          - "{{ lookup('env', 'HOST_REPO') | default('/work', true) }}/data:/import:ro"
         published_ports:
           - "3306:3306"
 
