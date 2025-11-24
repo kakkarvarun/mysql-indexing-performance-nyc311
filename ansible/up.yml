@@ -150,7 +150,7 @@
       loop: "{{ norm_csvs }}"
 
 
-            - name: Truncate final table nyc311 (rerun-safe)
+    - name: Truncate final table nyc311 (rerun-safe)
       community.docker.docker_container_exec:
         container: "{{ mysql_name }}"
         command: bash -lc "mysql -u{{ app_user }} -p{{ app_password }} {{ db_name }}"
